@@ -13,6 +13,7 @@ from backend.file_ingestion import LogFileReader
 from backend.forensic_correlation import ForensicCorrelationEngine
 from backend.investigation_service import InvestigationService
 from backend.log_parser import LogParser
+from backend.logmind_assistant import LogMindAssistant
 from backend.reporting import ReportExporter
 from backend.repository import LogRepository
 from backend.scoring import CompositeRiskScorer, EventClassifier, EventScoringService, HeuristicRiskScorer, LstmRiskScorer
@@ -35,6 +36,7 @@ enterprise_exporter = EnterpriseExporter()
 enterprise_push_client = EnterprisePushClient(enterprise_exporter)
 file_reader = LogFileReader()
 correlation_engine = ForensicCorrelationEngine()
+logmind_assistant = LogMindAssistant(correlation_engine)
 investigation_service = InvestigationService(
     parser=LogParser(),
     scoring_service=EventScoringService(
@@ -282,7 +284,7 @@ def ask_case(case_id):
     if not query:
         return jsonify({"error": "Question is required"}), 400
 
-    answer = correlation_engine.answer_query(case_events_for_correlation(case_id), query)
+    answer = logmind_assistant.answer(case_events_for_correlation(case_id), query)
     audit_logger.record("natural_language_query", details={"case_id": case_id, "query": query[:160]})
     return jsonify(answer)
 

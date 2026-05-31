@@ -51,6 +51,8 @@ class ForensicEntityExtractor:
         files = []
         for match in FILE_RE.finditer(raw_log):
             value = match.group("file").rstrip(".,;)")
+            if value.lower() in {"/all", "/quiet"}:
+                continue
             if value.lower().endswith((".exe", ".dll", ".apk", ".ps1", ".bat", ".cmd")):
                 continue
             files.append(value)

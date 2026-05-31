@@ -541,7 +541,10 @@ async function askCase() {
         });
         const intentLabel = data.intent ? ` Intent: ${data.intent.replace(/_/g, " ")}.` : "";
         const confidenceLabel = data.confidence ? ` Confidence: ${data.confidence}%.` : "";
-        $("answerBox").textContent = `${data.answer} Matched events: ${data.matched_count || 0}.${intentLabel}${confidenceLabel}`;
+        const mitreLabel = Array.isArray(data.mitre) && data.mitre.length
+            ? ` MITRE: ${data.mitre.map((item) => `${item.technique_id} ${item.name}`).join("; ")}.`
+            : "";
+        $("answerBox").textContent = `${data.answer} Evidence events: ${data.matched_count || 0}.${intentLabel}${confidenceLabel}${mitreLabel}`;
         $("queryResults").innerHTML = (data.events || []).slice(0, 8).map((item) => `
             <article>
                 <strong>${escapeHtml(item.phase)}</strong>

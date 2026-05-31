@@ -75,6 +75,23 @@ class LstmRiskScorer(RiskScorer):
 
 
 class HeuristicRiskScorer(RiskScorer):
+    TRANSFER_TERMS = (
+        "mtptransfer",
+        "obex transfer",
+        "sent email",
+        "attachment",
+        "mail upload",
+        "channel=usb",
+        "channel=bluetooth",
+        "android device",
+    )
+    EXFIL_TERMS = (
+        "external.receiver",
+        "smtp mail upload",
+        "sent email to external",
+        "attachment=",
+    )
+
     def score(self, parsed_log: ParsedLog) -> Dict[str, Optional[float]]:
         lowered = parsed_log.raw_log.lower()
         score = 0.08
@@ -83,6 +100,10 @@ class HeuristicRiskScorer(RiskScorer):
         score += sum(0.08 for term in SUSPICIOUS_TERMS if term in lowered)
         if parsed_log.event_type == "firewall_port_scan" or any(term in lowered for term in ["port scan", "scan detected", "nmap"]):
             score += 0.32
+        if any(term in lowered for term in self.TRANSFER_TERMS):
+            score += 0.22
+        if any(term in lowered for term in self.EXFIL_TERMS):
+            score += 0.28
 
         if parsed_log.severity in {"ALERT", "CRITICAL"}:
             score += 0.28
@@ -176,6 +197,8 @@ class EventClassifier:
             "deleted /var/log",
             "ransomware",
             "malware",
+            "sent email to external",
+            "smtp mail upload",
         ]
         if any(pattern in lowered for pattern in attack_patterns):
             return True
@@ -191,14 +214,43 @@ class EventClassifier:
         ]
         blocked_by_bad_terms = any(
             term in lowered
-            for term in ["failed", "invalid user", "ufw block", "denied", "sqlmap", "encodedcommand", "critical", "deleted"]
+            for term in [
+                "failed",
+                "invalid user",
+                "ufw block",
+                "denied",
+                "sqlmap",
+                "encodedcommand",
+                "critical",
+                "deleted",
+                "mtptransfer",
+                "obex transfer",
+                "sent email",
+                "attachment",
+                "mail upload",
+                "channel=usb",
+                "channel=bluetooth",
+            ]
         )
         return parsed_log.severity == "INFO" and not blocked_by_bad_terms and any(
             pattern in lowered for pattern in normal_patterns
         )
 
     def _has_dangerous_action(self, lowered: str) -> bool:
-        return any(term in lowered for term in ["delete", "powershell", "cmd.exe", "sudo", "malware"])
+        return any(term in lowered for term in [
+            "delete",
+            "powershell",
+            "cmd.exe",
+            "sudo",
+            "malware",
+            "mtptransfer",
+            "obex transfer",
+            "sent email",
+            "attachment",
+            "mail upload",
+            "channel=usb",
+            "channel=bluetooth",
+        ])
 
     def explain(self, parsed_log: ParsedLog, score: float, verdict: str) -> str:
         reasons = []
@@ -220,6 +272,12 @@ class EventClassifier:
             reasons.append("port scan activity")
         if any(term in lowered for term in ["delete", "deleted", "rm "]):
             reasons.append("destructive file activity")
+        if any(term in lowered for term in ["mtptransfer", "channel=usb", "android device"]):
+            reasons.append("file movement to removable/mobile device")
+        if any(term in lowered for term in ["obex transfer", "channel=bluetooth"]):
+            reasons.append("Bluetooth file transfer")
+        if any(term in lowered for term in ["sent email", "attachment", "mail upload", "smtp"]):
+            reasons.append("outbound file transfer")
         if parsed_log.features[0] > 3:
             reasons.append("repeated activity from same source")
 

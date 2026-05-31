@@ -33,7 +33,8 @@ SEVERITY_WORDS = {
 EVENT_KEYWORDS = {
     "web_attack": ["sqlmap", "union select", "' or '1'='1", "login.php", "wp-login", "xss", "csrf"],
     "authentication": ["login", "logon", "auth", "password", "credential", "ssh", "rdp"],
-    "file_activity": ["file", "delete", "deleted", "modify", "chmod", "write"],
+    "file_activity": ["file", "delete", "deleted", "modify", "chmod", "write", "opened", "copied"],
+    "file_transfer": ["mtptransfer", "obex transfer", "sent email", "attachment", "mail upload", "channel=usb", "channel=bluetooth"],
     "network": ["connection", "connect", "firewall", "port", "dns", "http", "tcp", "udp"],
     "malware": ["malware", "virus", "trojan", "ransomware", "payload"],
     "privilege": ["sudo", "admin", "root", "privilege", "elevat"],
@@ -65,6 +66,15 @@ SUSPICIOUS_TERMS = [
     "delete",
     "deleted",
     "sudo",
+    "mtptransfer",
+    "obex transfer",
+    "sent email",
+    "attachment",
+    "mail upload",
+    "external.receiver",
+    "channel=usb",
+    "channel=bluetooth",
+    "copied",
 ]
 
 
@@ -101,6 +111,15 @@ class TypedLogParser:
         )
 
     def extract_source_ip(self, line: str) -> str:
+        for pattern in (
+            r"\bsource_ip[=: ]+({ip})\b",
+            r"\bsrc(?:_ip)?[=: ]+({ip})\b",
+            r"\bSRC=({ip})\b",
+            r"\bSourceNetworkAddress[=: ]+({ip})\b",
+        ):
+            match = re.search(pattern.format(ip=IP_RE.pattern.strip(r"\b")), line, re.IGNORECASE)
+            if match:
+                return match.group(1)
         ip_match = IP_RE.search(line)
         return ip_match.group(0) if ip_match else "unknown"
 
@@ -149,13 +168,13 @@ class TypedLogParser:
 
         login_attempts = max(repeated_ip_count, 1 if any(term in lowered for term in ["login", "auth", "ssh"]) else 0)
         session_level = min(10, max(1, len(line) // 40))
-        file_access = int(any(term in lowered for term in ["file", "read", "open", "download"]))
+        file_access = int(any(term in lowered for term in ["file", "read", "open", "opened", "copy", "copied", "download", "attachment"]))
         file_delete = int(any(term in lowered for term in ["delete", "deleted", "remove", "rm "]))
         network_activity = min(10, 1 + sum(term in lowered for term in ["connect", "port", "tcp", "udp", "http", "dns"]))
         process_activity = min(10, sum(term in lowered for term in ["process", "cmd", "powershell", "bash", "exec"]))
         suspicious_cmd = int(any(term in lowered for term in ["powershell", "cmd.exe", "wget", "curl", "base64", "chmod"]))
         remote_login = int(any(term in lowered for term in ["ssh", "rdp", "remote"]))
-        usb_activity = int("usb" in lowered or "removable" in lowered)
+        usb_activity = int("usb" in lowered or "removable" in lowered or "mtp" in lowered)
 
         return [
             float(login_attempts),
@@ -255,7 +274,20 @@ class EndpointLogParser(TypedLogParser):
         lowered = line.lower()
         if any(term in lowered for term in ["malware", "ransomware", "quarantine", "encodedcommand", "credential dump"]):
             return "CRITICAL"
-        if any(term in lowered for term in ["powershell", "cmd.exe", "file deleted", "usb storage", "privilege escalation"]):
+        if any(term in lowered for term in [
+            "powershell",
+            "cmd.exe",
+            "file deleted",
+            "usb storage",
+            "privilege escalation",
+            "mtptransfer",
+            "obex transfer",
+            "sent email",
+            "attachment",
+            "mail upload",
+            "channel=usb",
+            "channel=bluetooth",
+        ]):
             return "WARNING"
         return super().detect_severity(line)
 
@@ -263,9 +295,13 @@ class EndpointLogParser(TypedLogParser):
         lowered = line.lower()
         if any(term in lowered for term in ["powershell", "cmd.exe", "process created", "new process", "exec"]):
             return self.prefixed_event("process_activity")
+        if any(term in lowered for term in ["sent email", "attachment", "mail upload", "smtp"]):
+            return self.prefixed_event("outbound_transfer")
+        if any(term in lowered for term in ["mtptransfer", "obex transfer", "channel=usb", "channel=bluetooth", "android device"]):
+            return self.prefixed_event("device_transfer")
         if any(term in lowered for term in ["usb", "removable"]):
             return self.prefixed_event("usb_activity")
-        if any(term in lowered for term in ["file deleted", "delete", "rm ", "chmod", "modified"]):
+        if any(term in lowered for term in ["file deleted", "delete", "rm ", "chmod", "modified", "opened", "copied"]):
             return self.prefixed_event("file_activity")
         if any(term in lowered for term in ["malware", "ransomware", "trojan", "quarantine"]):
             return self.prefixed_event("malware_alert")
