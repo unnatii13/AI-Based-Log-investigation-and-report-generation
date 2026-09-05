@@ -362,8 +362,19 @@ canvas {
 
 .export-group {
     display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
 }
+
+.verification-result {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.verification-result[data-type="success"] { color: var(--good); }
+.verification-result[data-type="warning"] { color: var(--warn); }
+.verification-result[data-type="error"] { color: var(--bad); }
 
 .sample-actions {
     flex-wrap: wrap;

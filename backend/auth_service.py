@@ -1,7 +1,9 @@
 from flask import session
+from datetime import datetime, timedelta, timezone
 
 
 MAX_FAILED_ATTEMPTS = 5
+LOCKOUT_DURATION = timedelta(minutes=15)
 
 
 class AuthService:
@@ -18,11 +20,25 @@ class AuthService:
         if not user:
             return None
 
-        if not user["is_active"] or user["failed_attempts"] >= MAX_FAILED_ATTEMPTS:
+        if not user["is_active"]:
             return None
 
+        if user["failed_attempts"] >= MAX_FAILED_ATTEMPTS:
+            locked_until = self._parse_timestamp(user.get("locked_until"))
+            if locked_until and locked_until > datetime.now(timezone.utc):
+                return None
+            # Existing permanently locked accounts and expired temporary locks
+            # are restored automatically on the next login attempt.
+            self.user_repository.reset_failed_attempts(username)
+            user["failed_attempts"] = 0
+
         if not self.user_repository.verify_password(user, password):
-            self.user_repository.increment_failed_attempts(username)
+            locked_until = datetime.now(timezone.utc) + LOCKOUT_DURATION
+            self.user_repository.record_failed_attempt(
+                username,
+                MAX_FAILED_ATTEMPTS,
+                locked_until.isoformat(),
+            )
             return None
 
         self.user_repository.reset_failed_attempts(username)
@@ -45,3 +61,13 @@ class AuthService:
         if not username or not role:
             return None
         return {"username": username, "role": role}
+
+    @staticmethod
+    def _parse_timestamp(value):
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None

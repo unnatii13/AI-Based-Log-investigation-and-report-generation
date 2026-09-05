@@ -38,6 +38,7 @@ class UserRepository:
                 )
                 """
             )
+            self._ensure_column(connection, "users", "locked_until", "TEXT")
 
     def ensure_default_users(self):
         for username, password, role in DEFAULT_USERS:
@@ -68,7 +69,7 @@ class UserRepository:
         with self.connect() as connection:
             row = connection.execute(
                 """
-                SELECT id, username, password_hash, role, is_active, failed_attempts, created_at, last_login_at
+                SELECT id, username, password_hash, role, is_active, failed_attempts, created_at, last_login_at, locked_until
                 FROM users
                 WHERE username = ?
                 """,
@@ -86,19 +87,32 @@ class UserRepository:
                 (self._now(), username),
             )
 
-    def increment_failed_attempts(self, username):
+    def record_failed_attempt(self, username, max_attempts, locked_until):
         with self.connect() as connection:
             connection.execute(
                 "UPDATE users SET failed_attempts = failed_attempts + 1 WHERE username = ?",
                 (username,),
             )
+            attempts = connection.execute(
+                "SELECT failed_attempts FROM users WHERE username = ?", (username,)
+            ).fetchone()["failed_attempts"]
+            if attempts >= max_attempts:
+                connection.execute(
+                    "UPDATE users SET locked_until = ? WHERE username = ?",
+                    (locked_until, username),
+                )
 
     def reset_failed_attempts(self, username):
         with self.connect() as connection:
             connection.execute(
-                "UPDATE users SET failed_attempts = 0 WHERE username = ?",
+                "UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE username = ?",
                 (username,),
             )
+
+    def _ensure_column(self, connection, table_name, column_name, column_type):
+        columns = {row["name"] for row in connection.execute(f"PRAGMA table_info({table_name})")}
+        if column_name not in columns:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
     @staticmethod
     def _now():

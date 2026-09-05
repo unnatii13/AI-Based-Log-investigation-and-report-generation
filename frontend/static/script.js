@@ -399,6 +399,8 @@ async function clearLogs() {
 }
 
 async function verifyChain() {
+    const button = $("verifyChainBtn");
+    const result = $("verificationResult");
     let caseId;
     try {
         caseId = requireSelectedCase();
@@ -407,15 +409,36 @@ async function verifyChain() {
         return;
     }
 
+    button.disabled = true;
+    result.textContent = "Verifying…";
+    result.dataset.type = "info";
     try {
         const data = await requestJson(`/cases/${caseId}/verify_chain`);
         if (data.valid) {
-            setMessage(`Chain verified for ${data.checked_logs || 0} logs.`, "success");
+            const checked = data.checked_logs || 0;
+            if (!checked) {
+                result.textContent = "No stored logs to verify.";
+                result.dataset.type = "warning";
+                setMessage("No stored logs to verify.", "warning");
+                return;
+            }
+            const coverage = data.legacy_logs
+                ? ` ${data.legacy_logs} legacy log(s) cover raw text only.`
+                : " Full-record integrity confirmed.";
+            result.textContent = `Verified: ${checked} log(s).${coverage}`;
+            result.dataset.type = data.legacy_logs ? "warning" : "success";
+            setMessage(`Chain verified for ${checked} logs.${coverage}`, data.legacy_logs ? "warning" : "success");
             return;
         }
+        result.textContent = `Failed: ${data.failures.length} log(s) changed.`;
+        result.dataset.type = "error";
         setMessage(`Chain verification failed for ${data.failures.length} log(s).`, "error");
     } catch (error) {
+        result.textContent = `Verification error: ${error.message}`;
+        result.dataset.type = "error";
         setMessage(error.message, "error");
+    } finally {
+        button.disabled = false;
     }
 }
 

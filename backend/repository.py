@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from .domain import ScoredEvent
 
 
 class LogRepository:
+    INTEGRITY_VERSION = 2
     def __init__(self, db_path: Path):
         self.db_path = db_path
 
@@ -53,6 +55,9 @@ class LogRepository:
             self._ensure_column(conn, "cases", "created_at", "TEXT")
             self._ensure_column(conn, "logs", "case_id", "INTEGER")
             self._ensure_column(conn, "logs", "explanation", "TEXT")
+            # Version 1 hashes protected only raw_log. Version 2 protects every
+            # evidence field persisted in a log record.
+            self._ensure_column(conn, "logs", "integrity_version", "INTEGER NOT NULL DEFAULT 1")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_case_id ON logs(case_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_case_name ON logs(case_name)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_verdict ON logs(verdict)")
@@ -126,15 +131,19 @@ class LogRepository:
         with self._connect() as conn:
             previous_hash = self._latest_hash(conn, case_id)
             for event in events:
-                integrity_hash = self.chain_hash(event.raw_log, previous_hash)
+                integrity_hash = self.chain_hash(
+                    self._event_integrity_payload(case_id, case["title"], ingested_at, event),
+                    previous_hash,
+                    self.INTEGRITY_VERSION,
+                )
                 conn.execute(
                     """
                     INSERT INTO logs (
                         case_id, case_name, line_no, ingested_at, event_time, source_ip, severity,
                         event_type, risk_score, verdict, explanation, model_source, raw_log,
-                        previous_hash, integrity_hash
+                        previous_hash, integrity_hash, integrity_version
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         case_id,
@@ -152,6 +161,7 @@ class LogRepository:
                         event.raw_log,
                         previous_hash,
                         integrity_hash,
+                        self.INTEGRITY_VERSION,
                     ),
                 )
                 previous_hash = integrity_hash
@@ -200,7 +210,9 @@ class LogRepository:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, raw_log, previous_hash, integrity_hash
+                SELECT id, case_id, case_name, line_no, ingested_at, event_time, source_ip, severity,
+                       event_type, risk_score, verdict, explanation, model_source, raw_log,
+                       previous_hash, integrity_hash, integrity_version
                 FROM logs
                 WHERE case_id = ?
                 ORDER BY id ASC
@@ -211,8 +223,17 @@ class LogRepository:
         previous_hash = ""
         checked = 0
         failures = []
+        legacy_logs = 0
         for row in rows:
-            expected_hash = self.chain_hash(row["raw_log"], previous_hash)
+            integrity_version = row["integrity_version"] or 1
+            if integrity_version >= self.INTEGRITY_VERSION:
+                payload = self._stored_event_integrity_payload(row)
+            else:
+                # Keep historical chains verifiable, but report that their
+                # coverage is limited to the original raw log text.
+                payload = row["raw_log"]
+                legacy_logs += 1
+            expected_hash = self.chain_hash(payload, previous_hash, integrity_version)
             if row["previous_hash"] != previous_hash or row["integrity_hash"] != expected_hash:
                 failures.append(
                     {
@@ -231,6 +252,8 @@ class LogRepository:
             "valid": not failures,
             "checked_logs": checked,
             "failures": failures,
+            "legacy_logs": legacy_logs,
+            "integrity_coverage": "full_record" if not legacy_logs else "raw_log_only_for_legacy_records",
         }
 
     def _connect(self):
@@ -245,9 +268,60 @@ class LogRepository:
         ).fetchone()
         return previous["integrity_hash"] if previous else ""
 
-    def chain_hash(self, raw_log: str, previous_hash: str = "") -> str:
-        payload = f"{previous_hash}|{raw_log}".encode("utf-8", errors="replace")
+    def chain_hash(self, evidence_payload: str, previous_hash: str = "", integrity_version: int = 1) -> str:
+        # Preserve verification for hashes created before versioned, full-record
+        # protection was introduced.
+        prefix = f"v{integrity_version}|" if integrity_version >= self.INTEGRITY_VERSION else ""
+        payload = f"{prefix}{previous_hash}|{evidence_payload}".encode("utf-8", errors="replace")
         return hashlib.sha256(payload).hexdigest()
+
+    def _event_integrity_payload(self, case_id: int, case_name: str, ingested_at: str, event: ScoredEvent) -> str:
+        return self._canonical_integrity_payload(
+            {
+                "case_id": case_id,
+                "case_name": case_name,
+                "line_no": event.line_no,
+                "ingested_at": ingested_at,
+                "event_time": event.timestamp,
+                "source_ip": event.source_ip,
+                "severity": event.severity,
+                "event_type": event.event_type,
+                "risk_score": event.risk_score,
+                "verdict": event.verdict,
+                "explanation": event.explanation,
+                "model_source": event.model_source,
+                "raw_log": event.raw_log,
+            }
+        )
+
+    def _stored_event_integrity_payload(self, row) -> str:
+        return self._canonical_integrity_payload(
+            {
+                "case_id": row["case_id"],
+                "case_name": row["case_name"],
+                "line_no": row["line_no"],
+                "ingested_at": row["ingested_at"],
+                "event_time": row["event_time"],
+                "source_ip": row["source_ip"],
+                "severity": row["severity"],
+                "event_type": row["event_type"],
+                "risk_score": row["risk_score"],
+                "verdict": row["verdict"],
+                "explanation": row["explanation"],
+                "model_source": row["model_source"],
+                "raw_log": row["raw_log"],
+            }
+        )
+
+    @staticmethod
+    def _canonical_integrity_payload(fields: Dict) -> str:
+        normalized_fields = dict(fields)
+        # SQLite may return an integral REAL value as 31.0 while an in-memory
+        # scorer can supply 31. Normalize it so the protected representation is
+        # stable across the write/read boundary.
+        if normalized_fields["risk_score"] is not None:
+            normalized_fields["risk_score"] = float(normalized_fields["risk_score"])
+        return json.dumps(normalized_fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     def _ensure_column(self, conn, table_name: str, column_name: str, column_type: str):
         columns = self._table_columns(conn, table_name)
